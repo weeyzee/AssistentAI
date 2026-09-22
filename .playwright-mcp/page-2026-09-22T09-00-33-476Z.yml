@@ -1,9 +1,0 @@
-- generic [active] [ref=f1e1]:
-  - generic [ref=f1e4]: соединяюсь…
-  - generic [ref=f1e5]:
-    - button "🎤 Говорить" [ref=f1e6]
-    - button "📷 Камера" [ref=f1e7]
-  - generic [ref=f1e8]:
-    - button "🖐 Погладить" [ref=f1e9]
-    - button "🔊 Звук" [ref=f1e10]
-  - generic [ref=f1e11]: 14:00:33 страница загружена

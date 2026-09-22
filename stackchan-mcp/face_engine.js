@@ -302,10 +302,12 @@ class StackchanFace {
   }
 
   drawSleepingZ() {
-    const drift = Math.sin(this.t * 1.5) * 3;
-    const zs = [[242, 58, 4], [258, 40, 5], [276, 18, 6]];
+    const zs = [[236, 60, 4], [258, 38, 5], [282, 16, 6]];
+    let index = 0;
     for (const [zx, zy, s] of zs) {
-      const x = zx + drift;
+      // у каждой «z» своя фаза — буквы не слипаются
+      const x = zx + Math.sin(this.t * 1.4 + index * 1.1) * 4;
+      index++;
       // буква Z: верхняя перекладина, диагональ, нижняя перекладина
       this.r(x, zy, s * 5, s, FACE_COLORS.main);
       for (let i = 0; i < 5; i++) {

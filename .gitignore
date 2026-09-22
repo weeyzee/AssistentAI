@@ -10,3 +10,6 @@ __pycache__/
 stackchan-mcp/.assistant_session.json
 stackchan-mcp/.git.upstream-backup/
 *.log
+
+# Артефакты Playwright MCP
+.playwright-mcp/
