@@ -1,73 +1,80 @@
 # Assistent — виртуальный Stack-chan «Марк»
 
-Голосовой ассистент в телефоне, собранный на базе [stackchan-mcp](https://github.com/migratorywhale/stackchan-mcp) (MIT) — без железа: роль робота играет эмулятор на ПК, роль тела — веб-страница в Safari на iPhone.
+Голосовой ассистент в телефоне, собранный на базе [stackchan-mcp](https://github.com/migratorywhale/stackchan-mcp) (MIT) — **без железа**: роль робота играет эмулятор на ПК, роль тела — веб-страница в Safari на iPhone (микрофон, динамик, камера, экран-лицо).
 
 ```
-iPhone (Safari: микрофон/динамик/камера/морда)
+iPhone (Safari: микрофон/динамик/камера/лицо)
         │  https + Tailscale
         ▼
-virtual_stackchan.py  ── эмулятор HTTP API прошивки (порт 8090) + страница (8443)
+virtual_stackchan.py  ── эмулятор HTTP API прошивки (:8090) + страница телефона (:8443)
         ▲
         │
-phone_assistant.py ── запись → GigaAM (локальный ASR, :8765) → Claude (headless) → edge-tts → озвучка
+phone_assistant.py  ── запись с телефона → локальный ASR (:8765) → Claude (тёплый процесс) → edge-tts → озвучка
         ▲
         │
-Claude Code (MCP-сервер stackchan, .mcp.json) — тоже может говорить/смотреть через робота
+Claude Code (MCP-сервер stackchan из .mcp.json) — тоже может говорить/смотреть через робота
 ```
 
-## Что внутри
+## Состав и порты
 
-| Файл | Назначение |
-|------|-----------|
-| `stackchan-mcp/virtual_stackchan.py` | Эмулятор прошивки: device API + веб-страница для телефона |
-| `stackchan-mcp/virtual_ui.html` | Страница телефона: запись, камера, лицо, кнопки тач-полосы |
-| `stackchan-mcp/face_engine.js` | Программное лицо 320×172 для переноса в прошивку ESP32 |
-| `stackchan-mcp/phone_assistant.py` | Фоновый голосовой цикл: запись → ASR → Claude → озвучка |
-| `stackchan-mcp/asr_service.py` | Копия сервиса GigaAM — оригинал живёт в проекте `asr-tests` |
-| `stackchan-mcp/start_virtual.ps1` | Запуск/остановка/статус всех фоновых процессов |
-| `stackchan-mcp/.env` | Конфиг (локальный ASR, edge-tts, русский язык) |
-| `.mcp.json` | Регистрация MCP-сервера stackchan для Claude Code |
+| Компонент | Порт | Что делает |
+|-----------|------|-----------|
+| `virtual_stackchan.py` | 8090 (device API), 8443 (https-страница) | Эмулирует прошивку Stack-chan: `/play`, `/audio`, `/face`, `/snapshot`… и отдаёт страницу для телефона |
+| `asr_service.py` | 8765 | Локальное распознавание русской речи (GigaAM v2-ctc, sherpa-onnx int8, CPU) |
+| `phone_assistant.py` | — | Фоновый голосовой цикл: слушает записи, отвечает голосом |
+| `audio_server` (внутри MCP/ассистента) | 5099 | Отдаёт WAV-файлы эмулятору для воспроизведения |
+| Claude Code MCP `stackchan` | — | Позволяет ИИ в консоли вызывать `stackchan_say/listen/see/...` |
 
-Патчи поверх upstream: локальный ASR вместо Fish Audio (`STACKCHAN_LOCAL_ASR_URL`), русский голос edge-tts (`EDGE_VOICES["ru"]`), язык по умолчанию из `STACKCHAN_VOICE_LANG`, таймаут у edge-tts.
+## Быстрый старт (на новой машине)
 
-## Запуск
-
-Требуется: Windows, Python 3.12, `uv`, `ffmpeg`, Tailscale, модели GigaAM в `C:\Users\Admin\Desktop\WhisperWork\asr-tests` (проект asr-tests).
+**Требования:** Windows, [uv](https://docs.astral.sh/uv/), `ffmpeg` в PATH, Node.js + Claude Code CLI (залогиненный), Tailscale (для доступа с телефона). Модели GigaAM лежат в проекте `asr-tests` (по умолчанию `C:\Users\Admin\Desktop\WhisperWork\asr-tests`); если их нет — в том проекте есть `fetch_models.py`, скачивающий ONNX-пакеты k2-fsa.
 
 ```powershell
 cd stackchan-mcp
-uv sync
-Copy-Item .env.virtual.example .env   # если .env ещё нет
-.\start_virtual.ps1           # фоновые процессы
-.\start_virtual.ps1 -Status   # проверить
-.\start_virtual.ps1 -StopAll  # остановить
+uv sync                                   # зависимости MCP-сервера
+uv tool install edge-tts                  # синтез речи (один раз на машину)
+Copy-Item .env.virtual.example .env       # если .env ещё нет — потом поправить пути
+.\start_virtual.ps1                       # поднять всё в фоне (окно можно закрыть)
+.\start_virtual.ps1 -Status               # проверить: 4 строки «работает»
+.\start_virtual.ps1 -StopAll              # остановить всё
 ```
 
-Страница для телефона: `https://<tailscale-ip>:8443/` (сертификат самоподписанный — принять один раз).
+Скрипт `start_virtual.ps1` сам запускает: ASR-сервис → эмулятор → ассистента и печатает адрес страницы для телефона (`https://<tailscale-ip>:8443/`).
 
-## Лицо (эмулятор будущей прошивки)
+**Телефон:** открыть этот адрес в Safari → один раз принять предупреждение о самоподписанном сертификате → кнопки «🎤 Говорить», «📷 Камера», «🖐 Погладить», «🔊 Звук». Речь: нажать «Говорить», сказать, нажать «Готово» — Марк ответит голосом через ~7 секунд.
 
-`face_engine.js` рисует лицо программно — без картинок, только примитивы, экран 320×172
-(ESP32-S3-LCD-1.47B-M, ST7789, альбомная ориентация). Состояния: `IDLE`, `LISTENING`,
-`THINKING`, `SPEAKING`, `HAPPY`, `SURPRISED`, `SLEEPING`, `ERROR`. Палитра: фон `#050608`,
-основной `#FFB000`, яркий `#FFD25A`, подсветка `#FF7A00`.
+## Управление, конфиг, логи
 
-Автоматика: моргание каждые 2–7 с, случайные взгляды в IDLE, рот по уровню звука в SPEAKING
-(Web Audio Analyser; на ESP32 — амплитуда I2S от MAX98357), сон после 3 минут тишины,
-кадр камеры показывается поверх лица 6 секунд (как в прошивке — JPEG на дисплее).
+- `.env` (в `stackchan-mcp/`, в гит не коммитится): адрес устройства (`STACKCHAN_IP/PORT`), аудио-сервер (`MAC_IP`, `AUDIO_SERVE_PORT`), движок синтеза (`TTS_ENGINE=edge-tts`, `EDGE_TTS_BIN`), язык (`STACKCHAN_VOICE_LANG=ru`), локальный ASR (`STACKCHAN_LOCAL_ASR_URL`), таймауты/ротация ассистента (`STACKCHAN_ASSISTANT_TIMEOUT`, `_MAX_TURNS`, `_MAX_AGE`, `_SESSION_TTL`).
+- Логи: `%TEMP%\virtual_stackchan\logs\` — `asr.out.log`, `emulator.out.log`, `assistant.out.log` (+ `.err.log`).
+- MCP-сервер для Claude Code — в корневом `.mcp.json`; для Codex — в `.codex/config.toml`.
 
-Перенос на ESP32: `r(x,y,w,h,c)` → `display.fillRect(...)`, `tick/render` → задача ~30 FPS
-с отрисовкой кадра в Sprite и одним выводом на экран (двойной буфер в PSRAM 320×172×2 байта),
-`setGaze()` ← события `move()` и гироскоп QMI8658, `setAudioLevel()` ← уровень аудио.
-Карта событий MCP → состояния: запись → `LISTENING`, ожидание ответа → `THINKING`,
-воспроизведение → `SPEAKING`, `nod`/`pet` → `HAPPY`, `shake` → `SURPRISED`, нет связи → `ERROR`.
+## Известные грабли
+
+- **edge-tts требует интернет** (сервис Microsoft). При проблемах с DNS он молча создаёт пустой файл — Марк не заговорит. Проверка: `.\.venv\Scripts\python.exe -c "import edge_tts"`, либо запустить `edge-tts.exe` вручную.
+- **Шим `~/.local/bin/edge-tts.exe` зависает из-под MCP-сервера** — использовать exe из `%APPDATA%\uv\tools\edge-tts\Scripts\edge-tts.exe` (так и прописано в `.env.virtual.example`), плюс в коде стоит `timeout` и `stdin=DEVNULL`.
+- **`.ps1` сохранять в UTF-8 с BOM** — иначе PowerShell 5.1 читает кириллицу как ANSI и скрипт не парсится.
+- **Tailscale на ПК должен быть запущен**, иначе телефон не дотянется; сам ПК **не должен уходить в сон** (блокировка экрана не мешает).
+- **Экран телефона должен быть включён** — iOS глушит микрофон и звук веб-страниц при блокировке/сворачивании.
+- **Кнопка «🔊 Звук»** — разблокировка аудио в Safari (iOS не даёт играть звук до касания); обычно не нужна, срабатывает автоматически при первом касании.
+- Если модель «задумалась» дольше 45 с — ассистент прервёт и повторит запрос, а при повторной неудаче скажет голосом «Что-то я задумался. Повтори, пожалуйста».
+
+## Лицо (задел под прошивку)
+
+`face_engine.js` рисует лицо **программно** — без картинок, только примитивы, экран 320×172 (ESP32-S3-LCD-1.47B-M: ST7789, альбомная ориентация). Состояния: `IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `HAPPY`, `SURPRISED`, `SLEEPING`, `ERROR`; палитра: фон `#050608`, основной `#FFB000`, яркий `#FFD25A`, подсветка `#FF7A00` (в текущей версии ветки `redesign-pixel-faces` — кольца-глаза). Автоматика: моргание 2–7 с, случайные взгляды, рот по уровню звука (Web Audio), сон после 3 минут тишины, кадр камеры поверх лица 6 с.
+
+Перенос на ESP32: `r(x,y,w,h,c)` → `display.fillRect(...)`; `tick/render` → задача ~30 FPS с кадром в Sprite (двойной буфер в PSRAM); рот считать по RMS сэмплов, **которые уже уходят в I2S** (иначе опередит динамик); `setGaze()` ← `move()`/гироскоп QMI8658. Важно: **у платы ESP32-S3-LCD-1.47B нет микрофона и усилителя** — микрофон, MAX98357 и динамик подключаются отдельно, GPIO планировать заранее. Готового русского wake-word («Марк») нет — это отдельная задача.
+
+## Проверено на слабом сервере (неттоп AMD E-350)
+
+Попытка унести стек на неттоп (AMD E-350, 2×1.6 ГГц, 3.4 ГБ RAM, Debian): обвязка (эмулятор + ассистент) там помещается, «мозг» — облачный Claude, локальная LLM не нужна. **Но GigaAM/sherpa-onnx не запускается: ONNX Runtime требует AVX, которого у E-350 нет** — падение с `Illegal instruction`. Варианты на будущее: Vosk (Kaldi, живёт на SSE; качество ниже GigaAM), либо оставить ASR на ПК, либо облачный ASR. На сервере ничего не устанавливалось — эксперимент остановлен.
 
 ## Ограничения
 
-- Экран **телефона** должен быть включён: iOS глушит микрофон/звук веб-страниц при блокировке.
-- Блокировка экрана **ПК** работе не мешает; сон ПК — мешает.
+- Экран **телефона** должен быть включён (микрофон веб-страницы в iOS работает только на активной вкладке).
 - Сервоприводы и датчики окружения — заглушки (реального железа нет).
+- edge-tts — облачный синтез (нужен интернет).
 
 ## Лицензия
 
-Код на базе stackchan-mcp (MIT, см. `stackchan-mcp/LICENSE`). Модели GigaAM — из проекта sherpa-onnx (см. лицензии в `asr-tests/models`).
+Код на базе stackchan-mcp (MIT, см. `stackchan-mcp/LICENSE`). Модели GigaAM — из проекта sherpa-onnx (лицензии в `asr-tests/models`).
