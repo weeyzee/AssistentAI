@@ -38,6 +38,9 @@ NETTOP_SCRIPT = f"{sys.executable} {ROOT / 'nettop_status.py'}"
 NETTOP_SECTIONS = ("all", "temp", "load", "containers", "disk", "memory")
 # Если модель «задумалась» дольше этого — прерываем и пробуем ещё раз (обычный ответ ~4 с).
 CLAUDE_TIMEOUT_SEC = float(os.environ.get("STACKCHAN_ASSISTANT_TIMEOUT", "45"))
+# Ротация тёплого процесса: контекст не должен расти бесконечно, иначе ответы замедляются.
+MAX_TURNS = int(os.environ.get("STACKCHAN_ASSISTANT_MAX_TURNS", "80"))
+MAX_SESSION_AGE_SEC = float(os.environ.get("STACKCHAN_ASSISTANT_MAX_AGE", "10800"))
 SYSTEM_PROMPT = (
     "Тебя зовут Марк — ты голосовой ассистент в телефоне-роботе Stack-chan. "
     "Человек говорит с тобой голосом через телефон. "
@@ -112,6 +115,9 @@ class WarmClaude:
         self.proc: subprocess.Popen | None = None
         self.lines: queue.Queue[str | None] = queue.Queue()
         self.session_id: str | None = None
+        self.turns = 0
+        self.started_at = 0.0
+        self.last_activity = time.time()
         self.binary = shutil.which("claude")
         if self.binary is None:
             raise RuntimeError("claude не найден в PATH")
@@ -151,8 +157,10 @@ class WarmClaude:
             command += ["--append-system-prompt", SYSTEM_PROMPT]
         return command
 
-    def start(self) -> None:
+    def start(self, *, fresh_session: bool = False) -> None:
         self.stop()
+        if fresh_session:
+            self.session_id = None
         self.proc = subprocess.Popen(  # noqa: S603 - фиксированный бинарь, без shell
             self._command(),
             stdin=subprocess.PIPE,
@@ -165,32 +173,56 @@ class WarmClaude:
             cwd=str(ROOT.parent),
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        threading.Thread(target=self._read_lines, daemon=True).start()
-        log("claude поднят (тёплый режим)")
+        # Своя очередь на каждый процесс: старый читающий поток не подсунет чужие строки.
+        self.lines = queue.Queue()
+        proc, lines = self.proc, self.lines
+        threading.Thread(target=self._read_lines, args=(proc, lines), daemon=True).start()
+        self.turns = 0
+        self.started_at = time.time()
+        log("claude поднят (тёплый режим)" + ("" if self.session_id else " — новый диалог"))
 
-    def _read_lines(self) -> None:
-        assert self.proc is not None and self.proc.stdout is not None
-        for line in self.proc.stdout:
-            self.lines.put(line)
-        self.lines.put(None)
+    def _read_lines(self, proc: subprocess.Popen, lines: queue.Queue[str | None]) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            lines.put(line)
+        lines.put(None)  # маркер конца именно этого процесса
 
     def stop(self) -> None:
-        if self.proc is not None:
-            self.proc.kill()
-            self.proc = None
+        proc = self.proc
+        self.proc = None
+        if proc is not None:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)  # дождаться, чтобы старый поток не мешал новому
+            except subprocess.TimeoutExpired:
+                pass
+
+    def _should_rotate(self) -> bool:
+        if self.session_id is None:
+            return False
+        idle = time.time() - self.last_activity
+        return (
+            self.turns >= MAX_TURNS
+            or (time.time() - self.started_at) >= MAX_SESSION_AGE_SEC
+            or idle > SESSION_TTL_SEC
+        )
 
     def ask(self, text: str) -> str:
         for attempt in (1, 2):
-            if self.proc is None or self.proc.poll() is not None:
+            if self._should_rotate():
+                log(f"диалог разросся ({self.turns} ходов) или долго молчал — начинаю новый")
+                self.start(fresh_session=True)
+            elif self.proc is None or self.proc.poll() is not None:
                 self.start()
+            proc, lines = self.proc, self.lines
             message = {
                 "type": "user",
                 "message": {"role": "user", "content": [{"type": "text", "text": text}]},
             }
-            assert self.proc is not None and self.proc.stdin is not None
+            assert proc is not None and proc.stdin is not None
             try:
-                self.proc.stdin.write(json.dumps(message) + "\n")
-                self.proc.stdin.flush()
+                proc.stdin.write(json.dumps(message) + "\n")
+                proc.stdin.flush()
             except OSError:
                 log(f"claude отвалился, поднимаю заново (попытка {attempt})")
                 self.stop()
@@ -205,7 +237,7 @@ class WarmClaude:
                     self.stop()
                     break
                 try:
-                    line = self.lines.get(timeout=min(remaining, 1.0))
+                    line = lines.get(timeout=min(remaining, 1.0))
                 except queue.Empty:
                     continue
                 if line is None:
@@ -222,6 +254,8 @@ class WarmClaude:
                     self.session_id = str(event["session_id"])
                 if event.get("is_error"):
                     raise RuntimeError(f"claude error: {event.get('result')}")
+                self.turns += 1
+                self.last_activity = time.time()
                 log(f"Claude ответил за {time.perf_counter() - started:.1f}s")
                 return str(event.get("result", "")).strip()
         raise RuntimeError(f"модель не ответила за две попытки по {CLAUDE_TIMEOUT_SEC:.0f}с")
@@ -237,16 +271,18 @@ def ask_claude(text: str, session_id: str | None) -> tuple[str, str | None]:
     return answer, _warm.session_id
 
 
-def speak(text: str, config) -> None:
+def speak(text: str, config, device: str = DEVICE) -> None:
     wav_path = generate_tts(text, "ru", config)
     validate_playback_wav(wav_path)
     url = audio_url(config.mac_ip, config.audio_serve_port, wav_path.name)
-    result = http_post_json(f"{DEVICE}/play", {"voice_url": url})
+    result = http_post_json(f"{device}/play", {"voice_url": url})
     if not result.get("success"):
         log(f"play не принят: {result}")
 
 
-def handle_recording(wav_bytes: bytes, config, session_id: str | None) -> str | None:
+def handle_recording(
+    wav_bytes: bytes, config, session_id: str | None, device: str = DEVICE
+) -> str | None:
     text = transcribe(wav_bytes)
     if not text:
         log("запись пустая после распознавания — пропускаю")
@@ -256,13 +292,13 @@ def handle_recording(wav_bytes: bytes, config, session_id: str | None) -> str | 
         answer, new_session = ask_claude(text, session_id)
     except Exception as exc:  # noqa: BLE001 - человек должен услышать хоть что-то
         log(f"ошибка Claude: {exc}")
-        speak("Что-то я задумался. Повтори, пожалуйста.", config)
+        speak("Что-то я задумался. Повтори, пожалуйста.", config, device)
         return session_id
     if not answer:
         log("Claude вернул пустой ответ")
         return session_id
     log(f"отвечаю: «{answer[:120]}»")
-    speak(answer, config)
+    speak(answer, config, device)
     if new_session:
         save_session_id(new_session)
         return new_session
@@ -301,7 +337,7 @@ def main() -> int:
             time.sleep(1)
             continue
         try:
-            session_id = handle_recording(wav_bytes, config, session_id)
+            session_id = handle_recording(wav_bytes, config, session_id, args.device)
         except Exception as exc:  # noqa: BLE001 - фоновый цикл не должен падать
             log(f"ошибка обработки: {exc}")
         if args.once:

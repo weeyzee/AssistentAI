@@ -74,6 +74,7 @@ let lastEventId = 0, recording = false, recorder = null, chunks = [];
 let camStream = null, camTimer = null, connected = false;
 let audioCtx = null, analyser = null, analyserData = null;
 let lastActivity = Date.now();
+let serverEpoch = null;
 
 // --- журнал и статус ---
 function log(msg) {
@@ -143,12 +144,18 @@ const FACE_MAP = {
 
 function handleEvent(ev) {
   touch();
+  // устаревшие «говори» и кадры не отыгрываем (например, после переподключения страницы)
+  if (ev.ts && (Date.now() / 1000 - ev.ts) > 15 && (ev.type === 'play' || ev.type === 'image')) {
+    log('⏭ пропустил устаревшее событие: ' + ev.type);
+    return;
+  }
   switch (ev.type) {
     case 'play':
       log('🔊 говорю');
-      face.setState('SPEAKING');
       player.src = ev.url + '?t=' + Date.now();
-      player.play().catch(e => log('аудио: ' + e.message + ' — нажми «Звук»'));
+      player.play()
+        .then(() => face.setState('SPEAKING'))
+        .catch(e => log('аудио: ' + e.message + ' — нажми «Звук»'));
       break;
     case 'face': {
       const mapped = FACE_MAP[ev.face] || 'IDLE';
@@ -181,8 +188,14 @@ function showPhoto() {
 
 async function poll() {
   try {
-    const r = await fetch('/web/poll?since=' + lastEventId, { cache: 'no-store' });
+    const url = '/web/poll?since=' + lastEventId + (serverEpoch ? '&epoch=' + serverEpoch : '');
+    const r = await fetch(url, { cache: 'no-store' });
     const data = await r.json();
+    if (data.epoch && data.epoch !== serverEpoch) {
+      if (serverEpoch !== null) log('🔄 сервер перезапустился — счётчик событий сброшен');
+      serverEpoch = data.epoch;
+      lastEventId = 0;
+    }
     lastEventId = data.next;
     for (const ev of data.events) handleEvent(ev);
     setConnected(true);
@@ -191,11 +204,13 @@ async function poll() {
   if (face.state === 'IDLE' && Date.now() - lastActivity > 180000) {
     face.setState('SLEEPING');
   }
-  if (face.state === 'SPEAKING') {
-    face.setAudioLevel(readAudioLevel());
-  }
   setTimeout(poll, 150);
 }
+
+// Рот должен следовать звуку независимо от сети: опрос событий может ждать до 20 секунд.
+setInterval(() => {
+  if (face.state === 'SPEAKING') face.setAudioLevel(readAudioLevel());
+}, 50);
 
 // --- кнопки ---
 const btnMic = document.getElementById('btnMic');

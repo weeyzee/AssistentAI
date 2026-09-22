@@ -59,6 +59,9 @@ class State:
         self.lock = threading.Condition()
         self.events: list[dict] = []
         self.last_id = 0
+        # Меняется при каждом запуске эмулятора: клиенты по нему понимают,
+        # что счётчик событий начался заново, и не отыгрывают старые команды.
+        self.epoch = uuid.uuid4().hex[:8]
         self.face = "calm"
         self.pet_count = 0
         self.rec_requests = 0
@@ -74,6 +77,7 @@ class State:
         with self.lock:
             self.last_id += 1
             event["id"] = self.last_id
+            event["ts"] = time.time()
             self.events.append(event)
             if len(self.events) > 500:
                 del self.events[:100]
@@ -532,11 +536,20 @@ class WebHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "no frame"}, 404)
                 return self._bytes(frame, "image/jpeg")
             if path == "/web/poll":
-                since = int(parse_qs(parsed.query).get("since", ["0"])[0])
-                events, last = state.wait_events(since)
+                params = parse_qs(parsed.query)
+                since = int(params.get("since", ["0"])[0])
+                client_epoch = params.get("epoch", [""])[0]
                 with state.lock:
                     face = state.face
-                return self._json({"events": events, "next": last, "face": face})
+                if client_epoch and client_epoch != state.epoch:
+                    # Эмулятор перезапускался: счётчик сброшен, старые события невалидны.
+                    return self._json(
+                        {"events": [], "next": 0, "epoch": state.epoch, "face": face}
+                    )
+                events, last = state.wait_events(since)
+                return self._json(
+                    {"events": events, "next": last, "epoch": state.epoch, "face": face}
+                )
             if path == "/web/state":
                 with state.lock:
                     return self._json(
