@@ -1,0 +1,45 @@
+// config.h.example
+
+#ifndef CONFIG_H
+#define CONFIG_H
+// ネットワーク設定（接続優先順）
+#define WIFI_NETWORK_COUNT 2
+
+// WiFi設定
+// 0: 自宅
+#define WIFI_SSID_0       "your-ssid"
+#define WIFI_PASSWORD_0   "your-password"
+// 1: スマホホットスポット → スマホアプリ
+#define WIFI_SSID_1     "your-hotspot-ssid"      
+#define WIFI_PASSWORD_1 "your_hotspot_pass" 
+
+// スピーカー設定
+#define SPEAKER_VOLUME  200
+
+// マイク設定
+#define MIC_SAMPLE_RATE           16000
+#define MIC_MAX_RECORD_SECONDS    8
+#define MIC_TRIGGER_RMS           0.0095f
+#define MIC_TRIGGER_HOLD_MS       280
+#define MIC_SILENCE_RMS           0.0020f
+#define MIC_SILENCE_HOLD_MS       1500
+#define MIC_FRAME_SAMPLES         1600
+#define MIC_MIN_VALID_SAMPLES     5200
+#define MIC_VOICE_CONFIRM_RMS     0.004f
+#define PRE_TRIGGER_BUFFER_SAMPLES 4800
+
+// マイク追加設定
+#define MIC_MAGNIFICATION         2
+#define MIC_NOISE_FILTER_LEVEL    1
+
+// HTTP タイムアウト (ms)
+#define HTTP_TIMEOUT_CHAT     30000
+#define HTTP_TIMEOUT_SHORT     5000
+
+// 通知チェック間隔 (ms)
+#define NOTIFICATION_CHECK_INTERVAL 60000
+
+// ディスプレイ
+#define DISPLAY_BRIGHTNESS  70
+
+#endif

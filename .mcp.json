@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "stackchan": {
+      "command": "C:\\Users\\Admin\\Desktop\\AI\\Assistent\\stackchan-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "C:\\Users\\Admin\\Desktop\\AI\\Assistent\\stackchan-mcp"
+    }
+  }
+}

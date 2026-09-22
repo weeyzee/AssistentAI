@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Локальные секреты и служебное
+.claude/
+stackchan-mcp/.assistant_session.json
+stackchan-mcp/.git.upstream-backup/
+*.log

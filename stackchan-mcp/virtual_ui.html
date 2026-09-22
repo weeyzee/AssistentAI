@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Марк — виртуальный Stack-chan</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; padding: 12px; font: 16px/1.4 -apple-system, system-ui, sans-serif;
+    background: #101014; color: #e8e8ea;
+    display: flex; flex-direction: column; gap: 12px; align-items: center;
+    min-height: 100dvh;
+  }
+  #faceWrap {
+    width: min(88vw, 420px); aspect-ratio: 4 / 3; border-radius: 20px; overflow: hidden;
+    background: #1b1b22; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 8px 30px #0008; position: relative;
+  }
+  #face { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #faceWrap.nod  { animation: nod 1s ease-in-out; }
+  #faceWrap.shake { animation: shake 0.9s ease-in-out; }
+  #faceWrap.move  { animation: move 1s ease-in-out; }
+  @keyframes nod   { 0%,100% { transform: none; } 50% { transform: translateY(26px) rotate(4deg); } }
+  @keyframes shake { 0%,100% { transform: none; } 25% { transform: translateX(-22px) rotate(-4deg); }
+                     75% { transform: translateX(22px) rotate(4deg); } }
+  @keyframes move  { 0%,100% { transform: none; } 50% { transform: rotate(-6deg); } }
+  #status { font-size: 14px; color: #9a9aa6; min-height: 20px; text-align: center; }
+  #status.off { color: #ff8080; }
+  .row { display: flex; gap: 10px; width: min(88vw, 420px); }
+  button {
+    flex: 1; padding: 16px 8px; font-size: 16px; font-weight: 600; color: #fff;
+    background: #2a2a36; border: 1px solid #3a3a4a; border-radius: 14px;
+  }
+  button:active { background: #3a3a4a; }
+  button.on { background: #7a2230; border-color: #b03040; }
+  button.rec { background: #a02030; border-color: #e04050; }
+  #log {
+    width: min(88vw, 420px); flex: 1; min-height: 90px; overflow-y: auto;
+    font: 13px/1.5 ui-monospace, monospace; color: #8f8f9c;
+    background: #17171d; border-radius: 12px; padding: 10px 12px;
+  }
+  #log div { margin-bottom: 2px; }
+</style>
+</head>
+<body>
+
+<div id="faceWrap"><img id="face" src="/faces/calm" alt="морда"></div>
+<div id="status">соединяюсь…</div>
+
+<div class="row">
+  <button id="btnMic">🎤 Говорить</button>
+  <button id="btnCam">📷 Камера</button>
+</div>
+<div class="row">
+  <button id="btnPet">🖐 Погладить</button>
+  <button id="btnSound">🔊 Звук</button>
+</div>
+
+<div id="log"></div>
+
+<audio id="player"></audio>
+<video id="cam" playsinline muted hidden></video>
+<canvas id="snap" width="320" height="240" hidden></canvas>
+
+<script>
+const faceEl = document.getElementById('face');
+const wrap = document.getElementById('faceWrap');
+const statusEl = document.getElementById('status');
+const logEl = document.getElementById('log');
+const player = document.getElementById('player');
+const camEl = document.getElementById('cam');
+const canvas = document.getElementById('snap');
+const ctx2d = canvas.getContext('2d');
+
+let lastEventId = 0, recording = false, recorder = null, chunks = [];
+let camStream = null, camTimer = null, connected = false;
+
+function log(msg) {
+  const div = document.createElement('div');
+  div.textContent = new Date().toLocaleTimeString('ru-RU') + '  ' + msg;
+  logEl.prepend(div);
+  while (logEl.childElementCount > 40) logEl.lastChild.remove();
+}
+function status(text, off) {
+  statusEl.textContent = text;
+  statusEl.classList.toggle('off', !!off);
+}
+function setConnected(ok) {
+  if (ok === connected) return;
+  connected = ok;
+  status(ok ? 'на связи' : 'нет связи с сервером', !ok);
+}
+
+// --- звук: iOS разрешает воспроизведение только после касания ---
+document.addEventListener('pointerdown', async () => {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) { const ctx = new AC(); await ctx.resume(); }
+    log('звук разблокирован');
+  } catch (e) { log('звук: ' + e.message); }
+}, { once: true });
+
+player.addEventListener('ended', () => { fetch('/web/played', { method: 'POST' }).catch(() => {}); });
+
+function showFace(name) {
+  faceEl.dataset.face = name;
+  faceEl.src = '/faces/' + encodeURIComponent(name) + '?t=' + Date.now();
+}
+function animate(kind) {
+  wrap.classList.remove(kind);
+  void wrap.offsetWidth;
+  wrap.classList.add(kind);
+  setTimeout(() => wrap.classList.remove(kind), 1200);
+}
+function showSnapshot() {
+  const prev = faceEl.src;
+  faceEl.src = '/web/frame.jpg?t=' + Date.now();
+  setTimeout(() => { faceEl.src = prev; }, 6000);
+}
+
+function handleEvent(ev) {
+  switch (ev.type) {
+    case 'play':
+      log('🔊 говорю');
+      player.src = ev.url + '?t=' + Date.now();
+      player.play().catch(e => log('аудио: ' + e.message + ' — нажми «Звук»'));
+      break;
+    case 'face':   log('😐 морда: ' + ev.face); showFace(ev.face); break;
+    case 'nod':    log('✅ киваю'); animate('nod'); break;
+    case 'shake':  log('❌ мотаю головой'); animate('shake'); break;
+    case 'move':   log('↔️ поворот'); animate('move'); break;
+    case 'home':   log('🏠 в исходную'); animate('move'); break;
+    case 'image':  log('👁 смотрю'); showSnapshot(); break;
+    case 'recording': log('✅ запись принята'); break;
+    case 'pet':    log('🖐 погладили!'); animate('nod'); break;
+    case 'tap':    log('👆 тап по полосе'); break;
+  }
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/web/poll?since=' + lastEventId, { cache: 'no-store' });
+    const data = await r.json();
+    lastEventId = data.next;
+    for (const ev of data.events) handleEvent(ev);
+    setConnected(true);
+  } catch (e) { setConnected(false); }
+  setTimeout(poll, 200);
+}
+
+const btnMic = document.getElementById('btnMic');
+const btnCam = document.getElementById('btnCam');
+const btnPet = document.getElementById('btnPet');
+const btnSound = document.getElementById('btnSound');
+
+function updateMicBtn() {
+  btnMic.textContent = recording ? '⏹ Готово' : '🎤 Говорить';
+  btnMic.classList.toggle('rec', recording);
+}
+
+btnMic.addEventListener('click', async () => {
+  if (recording && recorder) { recorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+    const candidates = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', ''];
+    const mime = candidates.find(m => !m || (window.MediaRecorder && MediaRecorder.isTypeSupported(m)));
+    recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      recording = false; updateMicBtn();
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      log('отправляю запись (' + blob.size + ' байт)…');
+      try {
+        const r = await fetch('/web/mic', { method: 'POST', body: blob });
+        const d = await r.json();
+        log(d.ok ? '✅ принято — спроси Claude: «что я сказал?»' : '❌ ' + d.error);
+      } catch (e) { log('❌ ' + e.message); }
+    };
+    recorder.start();
+    recording = true; updateMicBtn();
+    log('🎤 записываю…');
+  } catch (e) { log('микрофон: ' + e.message); }
+});
+
+btnCam.addEventListener('click', async () => {
+  if (camStream) {
+    camStream.getTracks().forEach(t => t.stop());
+    camStream = null;
+    clearInterval(camTimer); camTimer = null;
+    btnCam.classList.remove('on');
+    log('📷 камера выключена');
+    return;
+  }
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 } } });
+    camEl.srcObject = camStream;
+    await camEl.play().catch(() => {});
+    camTimer = setInterval(sendFrame, 2000);
+    btnCam.classList.add('on');
+    sendFrame();
+    log('📷 камера включена');
+  } catch (e) { log('камера: ' + e.message); }
+});
+
+async function sendFrame() {
+  if (!camEl.videoWidth) return;
+  ctx2d.drawImage(camEl, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob(async blob => {
+    if (!blob) return;
+    try { await fetch('/web/frame', { method: 'POST', body: blob }); } catch (e) {}
+  }, 'image/jpeg', 0.6);
+}
+
+btnPet.addEventListener('click', async () => {
+  try { await fetch('/web/pet', { method: 'POST' }); } catch (e) { log(e.message); }
+});
+
+btnSound.addEventListener('click', () => {
+  player.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
+  player.play().then(() => log('звук включён')).catch(e => log('звук: ' + e.message));
+});
+
+poll();
+log('страница загружена');
+</script>
+</body>
+</html>

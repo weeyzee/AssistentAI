@@ -1,0 +1,56 @@
+# macOS
+.DS_Store
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+dist/
+build/
+*.egg-info/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+firmware/src/config.h
+firmware/src/config.h.bak-*
+deploy/macos/*.plist
+
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+firmware/.pio/
+firmware/.vscode/
+compile_commands.json
+firmware/compile_commands.json
+
+# Other assistant configuration
+CLAUDE.md
+**/CLAUDE.md
+
+# Generated local artifacts
+*.log
+*.pid
+*.tmp
+*.bak
+stackchan_audio/
+.stackchan_audio/
+stackchan_otel.jsonl
+voice_inbox.jsonl
+relink.sh

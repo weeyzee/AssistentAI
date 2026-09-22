@@ -1,0 +1,99 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  schedule:
+    - cron: "41 18 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  security-audit:
+    name: security-audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked --dev
+
+      - name: Run repository security audit
+        run: uv run --locked python scripts/ci_security_audit.py
+
+      - name: Run dependency audit
+        run: |
+          tmp_requirements="$(mktemp)"
+          trap 'rm -f "$tmp_requirements"' EXIT
+          uv export --locked --no-dev --no-hashes -o "$tmp_requirements"
+          uv run --locked pip-audit -r "$tmp_requirements"
+
+  dependency-submission:
+    name: dependency-submission
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.11"
+
+      - name: Build dependency snapshot
+        run: >-
+          python scripts/build_dependency_snapshot.py
+          --output "$RUNNER_TEMP/dependency-snapshot.json"
+          --job-id "${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+          --correlator "${GITHUB_WORKFLOW}_${GITHUB_JOB}"
+
+      - name: Submit dependency snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api --method POST
+          -H "X-GitHub-Api-Version: 2026-03-10"
+          "repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots"
+          --input "$RUNNER_TEMP/dependency-snapshot.json"
+
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
