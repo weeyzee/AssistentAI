@@ -273,10 +273,24 @@ btnPet.addEventListener('click', async () => {
   try { await fetch('/web/pet', { method: 'POST' }); } catch (e) { log(e.message); }
 });
 
-btnSound.addEventListener('click', () => {
+btnSound.addEventListener('click', async () => {
   touch();
-  player.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-  player.play().then(() => log('звук включён')).catch(e => log('звук: ' + e.message));
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!audioCtx && AC) { audioCtx = new AC(); }
+    if (audioCtx) { await audioCtx.resume(); }
+    // тихий щелчок через Web Audio: элемент player не трогаем, чтобы не обрывать речь
+    if (audioCtx) {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.05);
+    }
+    log('звук включён');
+  } catch (e) { log('звук: ' + e.message); }
 });
 
 poll();

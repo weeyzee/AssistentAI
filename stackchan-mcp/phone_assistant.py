@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -34,6 +36,8 @@ SESSION_TTL_SEC = float(os.environ.get("STACKCHAN_ASSISTANT_SESSION_TTL", "7200"
 # Единственная разрешённая команда: read-only диагностика неттопа (фиксированный набор).
 NETTOP_SCRIPT = f"{sys.executable} {ROOT / 'nettop_status.py'}"
 NETTOP_SECTIONS = ("all", "temp", "load", "containers", "disk", "memory")
+# Если модель «задумалась» дольше этого — прерываем и пробуем ещё раз (обычный ответ ~4 с).
+CLAUDE_TIMEOUT_SEC = float(os.environ.get("STACKCHAN_ASSISTANT_TIMEOUT", "45"))
 SYSTEM_PROMPT = (
     "Тебя зовут Марк — ты голосовой ассистент в телефоне-роботе Stack-chan. "
     "Человек говорит с тобой голосом через телефон. "
@@ -43,7 +47,10 @@ SYSTEM_PROMPT = (
     "загрузку, docker-контейнеры, диски, память. Для этого вызови Bash ровно такой командой: "
     f"{NETTOP_SCRIPT} --section <раздел>, "
     "где <раздел> — одно из: all, temp, load, containers, disk, memory. "
-    "Команда только читает; ничего не меняй на сервере."
+    "Команда только читает; ничего не меняй на сервере. "
+    "Ещё у тебя есть камера: если человек спрашивает, что ты видишь (или просит посмотреть), "
+    "вызови инструмент mcp__stackchan__stackchan_see и опиши кадр. Кадр — актуальный на момент "
+    "вопроса. Если инструмент вернул ошибку (камера выключена) — так и скажи."
 )
 
 
@@ -93,50 +100,141 @@ def save_session_id(session_id: str) -> None:
     )
 
 
+class WarmClaude:
+    """Один процесс claude держится на связи: ответы без перезапуска (~2-3с вместо ~5с).
+
+    Протокол — stream-json: сообщения уходят строкой в stdin, ответ приходит событием
+    type=result в stdout. Диалог живёт внутри процесса; session_id сохраняем, чтобы
+    после перезапуска можно было продолжить разговор через --resume.
+    """
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+        self.lines: queue.Queue[str | None] = queue.Queue()
+        self.session_id: str | None = None
+        self.binary = shutil.which("claude")
+        if self.binary is None:
+            raise RuntimeError("claude не найден в PATH")
+
+    def _command(self) -> list[str]:
+        command = [
+            self.binary,
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            # Подключаем только наш MCP-сервер: камера (stackchan_see) по голосовой просьбе.
+            "--strict-mcp-config",
+            "--mcp-config",
+            str(ROOT.parent / ".mcp.json"),
+            # Голосовому ассистенту нужен быстрый ответ, а не агентные действия:
+            # инструменты без явного разрешения автоматически отклоняются.
+            "--permission-mode",
+            "dontAsk",
+            # Голосовой ответ должен быть быстрым — минимум рассуждений.
+            "--effort",
+            "low",
+            # Разрешены только точные команды (без wildcard — суффикс мог бы унести shell-инъекцию).
+            "--allowedTools",
+            ",".join(
+                [
+                    *(f"Bash({NETTOP_SCRIPT} --section {section})" for section in NETTOP_SECTIONS),
+                    "mcp__stackchan__stackchan_see",
+                ]
+            ),
+        ]
+        if self.session_id:
+            command += ["--resume", self.session_id]
+        else:
+            command += ["--append-system-prompt", SYSTEM_PROMPT]
+        return command
+
+    def start(self) -> None:
+        self.stop()
+        self.proc = subprocess.Popen(  # noqa: S603 - фиксированный бинарь, без shell
+            self._command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            encoding="utf-8",  # claude CLI пишет UTF-8, а не локальную кодировку Windows
+            errors="replace",
+            bufsize=1,
+            cwd=str(ROOT.parent),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        threading.Thread(target=self._read_lines, daemon=True).start()
+        log("claude поднят (тёплый режим)")
+
+    def _read_lines(self) -> None:
+        assert self.proc is not None and self.proc.stdout is not None
+        for line in self.proc.stdout:
+            self.lines.put(line)
+        self.lines.put(None)
+
+    def stop(self) -> None:
+        if self.proc is not None:
+            self.proc.kill()
+            self.proc = None
+
+    def ask(self, text: str) -> str:
+        for attempt in (1, 2):
+            if self.proc is None or self.proc.poll() is not None:
+                self.start()
+            message = {
+                "type": "user",
+                "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+            }
+            assert self.proc is not None and self.proc.stdin is not None
+            try:
+                self.proc.stdin.write(json.dumps(message) + "\n")
+                self.proc.stdin.flush()
+            except OSError:
+                log(f"claude отвалился, поднимаю заново (попытка {attempt})")
+                self.stop()
+                continue
+
+            started = time.perf_counter()
+            deadline = time.monotonic() + CLAUDE_TIMEOUT_SEC
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    log(f"модель молчит дольше {CLAUDE_TIMEOUT_SEC:.0f}с (попытка {attempt})")
+                    self.stop()
+                    break
+                try:
+                    line = self.lines.get(timeout=min(remaining, 1.0))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    log(f"claude завершился неожиданно (попытка {attempt})")
+                    self.stop()
+                    break
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") != "result":
+                    continue
+                if event.get("session_id"):
+                    self.session_id = str(event["session_id"])
+                if event.get("is_error"):
+                    raise RuntimeError(f"claude error: {event.get('result')}")
+                log(f"Claude ответил за {time.perf_counter() - started:.1f}s")
+                return str(event.get("result", "")).strip()
+        raise RuntimeError(f"модель не ответила за две попытки по {CLAUDE_TIMEOUT_SEC:.0f}с")
+
+
+_warm = WarmClaude()
+
+
 def ask_claude(text: str, session_id: str | None) -> tuple[str, str | None]:
-    claude_bin = shutil.which("claude")
-    if claude_bin is None:
-        raise RuntimeError("claude не найден в PATH")
-    command = [
-        claude_bin,
-        "-p",
-        text,
-        "--output-format",
-        "json",
-        "--strict-mcp-config",
-        # Голосовому ассистенту нужен быстрый ответ, а не агентные действия:
-        # инструменты без явного разрешения автоматически отклоняются.
-        "--permission-mode",
-        "dontAsk",
-        # Голосовой ответ должен быть быстрым — минимум рассуждений.
-        "--effort",
-        "low",
-        # Разрешены только точные команды (без wildcard — суффикс мог бы унести shell-инъекцию).
-        "--allowedTools",
-        ",".join(f"Bash({NETTOP_SCRIPT} --section {section})" for section in NETTOP_SECTIONS),
-    ]
-    if session_id:
-        command += ["--resume", session_id]
-    else:
-        command += ["--append-system-prompt", SYSTEM_PROMPT]
-    started = time.perf_counter()
-    completed = subprocess.run(  # noqa: S603 - фиксированный бинарь, без shell
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",  # claude CLI пишет UTF-8, а не локальную кодировку Windows
-        errors="replace",
-        timeout=240,
-        cwd=str(ROOT.parent),
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"claude exited {completed.returncode}: {completed.stderr[-300:]}")
-    payload = json.loads(completed.stdout)
-    if payload.get("is_error"):
-        raise RuntimeError(f"claude error: {payload.get('result')}")
-    answer = str(payload.get("result", "")).strip()
-    log(f"Claude ответил за {time.perf_counter() - started:.1f}s")
-    return answer, payload.get("session_id")
+    if session_id and session_id != _warm.session_id:
+        _warm.session_id = session_id
+    answer = _warm.ask(text)
+    return answer, _warm.session_id
 
 
 def speak(text: str, config) -> None:
@@ -154,7 +252,12 @@ def handle_recording(wav_bytes: bytes, config, session_id: str | None) -> str | 
         log("запись пустая после распознавания — пропускаю")
         return session_id
     log(f"услышал: «{text}»")
-    answer, new_session = ask_claude(text, session_id)
+    try:
+        answer, new_session = ask_claude(text, session_id)
+    except Exception as exc:  # noqa: BLE001 - человек должен услышать хоть что-то
+        log(f"ошибка Claude: {exc}")
+        speak("Что-то я задумался. Повтори, пожалуйста.", config)
+        return session_id
     if not answer:
         log("Claude вернул пустой ответ")
         return session_id
