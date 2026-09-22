@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -28,11 +29,17 @@ if hasattr(sys.stdout, "reconfigure"):
 
 DEVICE = "http://127.0.0.1:8090"
 SESSION_FILE = Path(__file__).resolve().parent / ".assistant_session.json"
+# Диалог помним 2 часа; старые сессии раздуваются и заметно замедляют ответы.
+SESSION_TTL_SEC = float(os.environ.get("STACKCHAN_ASSISTANT_SESSION_TTL", "7200"))
 SYSTEM_PROMPT = (
     "Тебя зовут Марк — ты голосовой ассистент в телефоне-роботе Stack-chan. "
     "Человек говорит с тобой голосом через телефон. "
     "Твой ответ будет озвучен синтезом речи, поэтому отвечай коротко: 1-3 предложения, "
-    "живой устной речью, без markdown, списков, смайликов и ссылок. Отвечай по-русски."
+    "живой устной речью, без markdown, списков, смайликов и ссылок. Отвечай по-русски. "
+    "Ещё ты умеешь проверять домашний сервер — неттоп «Aspire» (Linux), например температуру "
+    "процессора, загрузку, запущенные docker-контейнеры, место на диске. Для этого вызови Bash "
+    'с командой вида: ssh root@100.88.215.104 "<команда>". Работай только на чтение: '
+    "ничего не меняй, не останавливай и не перезагружай, если человек не попросил явно."
 )
 
 
@@ -66,27 +73,57 @@ def transcribe(wav_bytes: bytes) -> str:
 
 def load_session_id() -> str | None:
     try:
-        return str(json.loads(SESSION_FILE.read_text(encoding="utf-8"))["session_id"])
-    except (OSError, ValueError, KeyError):
+        data = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
+    if time.time() - float(data.get("updated", 0)) > SESSION_TTL_SEC:
+        log("старый диалог устарел — начинаю новый")
+        return None
+    session_id = str(data.get("session_id", ""))
+    return session_id or None
 
 
 def save_session_id(session_id: str) -> None:
-    SESSION_FILE.write_text(json.dumps({"session_id": session_id}), encoding="utf-8")
+    SESSION_FILE.write_text(
+        json.dumps({"session_id": session_id, "updated": time.time()}), encoding="utf-8"
+    )
 
 
 def ask_claude(text: str, session_id: str | None) -> tuple[str, str | None]:
     claude_bin = shutil.which("claude")
     if claude_bin is None:
         raise RuntimeError("claude не найден в PATH")
-    command = [claude_bin, "-p", text, "--output-format", "json", "--strict-mcp-config"]
+    command = [
+        claude_bin,
+        "-p",
+        text,
+        "--output-format",
+        "json",
+        "--strict-mcp-config",
+        # Голосовому ассистенту нужен быстрый ответ, а не агентные действия:
+        # инструменты без явного разрешения автоматически отклоняются.
+        "--permission-mode",
+        "dontAsk",
+        # Голосовой ответ должен быть быстрым — минимум рассуждений.
+        "--effort",
+        "low",
+        # Единственный разрешённый инструмент: диагностика неттопа на чтение.
+        "--allowedTools",
+        "Bash(ssh root@100.88.215.104:*)",
+    ]
     if session_id:
         command += ["--resume", session_id]
     else:
         command += ["--append-system-prompt", SYSTEM_PROMPT]
     started = time.perf_counter()
     completed = subprocess.run(  # noqa: S603 - фиксированный бинарь, без shell
-        command, capture_output=True, text=True, timeout=240, cwd=str(ROOT.parent)
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",  # claude CLI пишет UTF-8, а не локальную кодировку Windows
+        errors="replace",
+        timeout=240,
+        cwd=str(ROOT.parent),
     )
     if completed.returncode != 0:
         raise RuntimeError(f"claude exited {completed.returncode}: {completed.stderr[-300:]}")

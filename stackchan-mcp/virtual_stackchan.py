@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import socket
@@ -35,6 +36,9 @@ CERT_FILE = STATE_DIR / "cert.pem"
 KEY_FILE = STATE_DIR / "key.pem"
 
 VALID_FACES = ("calm", "thinking", "happy", "sleepy", "shy", "smug", "pouty")
+
+# /play качает только с локального аудио-сервера MCP (защита от SSRF)
+ALLOWED_PLAY_HOSTS = {"127.0.0.1", "localhost"} | {os.environ.get("MAC_IP", "").strip()}
 
 
 # ---------------------------------------------------------------- state
@@ -411,6 +415,12 @@ class DeviceHandler(BaseHTTPRequestHandler):
         url = str(body.get("voice_url", ""))
         if not url:
             return self._json({"success": False, "error": "voice_url required"}, 400)
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_PLAY_HOSTS:
+            return self._json(
+                {"success": False, "error": "voice_url must point at the local audio server"},
+                400,
+            )
         try:
             with urllib.request.urlopen(url, timeout=20) as resp:  # noqa: S310 - url задаёт хост-сервер MCP
                 data = resp.read()
@@ -598,7 +608,8 @@ def main() -> int:
     if _ffmpeg() is None:
         log("ВНИМАНИЕ: ffmpeg не найден — запись с телефона работать не будет")
 
-    device_server = ThreadingHTTPServer(("0.0.0.0", args.device_port), DeviceHandler)  # noqa: S104
+    # Device API нужен только локальным процессам (MCP-сервер и ассистент) — наружу не слушаем.
+    device_server = ThreadingHTTPServer(("127.0.0.1", args.device_port), DeviceHandler)
     threading.Thread(target=device_server.serve_forever, daemon=True).start()
     log(f"device API: http://127.0.0.1:{args.device_port} (для MCP-сервера)")
 

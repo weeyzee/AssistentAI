@@ -178,7 +178,7 @@ btnMic.addEventListener('click', async () => {
       try {
         const r = await fetch('/web/mic', { method: 'POST', body: blob });
         const d = await r.json();
-        log(d.ok ? '✅ принято — спроси Claude: «что я сказал?»' : '❌ ' + d.error);
+        log(d.ok ? '✅ принято — Марк сейчас ответит…' : '❌ ' + d.error);
       } catch (e) { log('❌ ' + e.message); }
     };
     recorder.start();
