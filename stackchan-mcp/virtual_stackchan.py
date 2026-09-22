@@ -41,6 +41,16 @@ VALID_FACES = ("calm", "thinking", "happy", "sleepy", "shy", "smug", "pouty")
 ALLOWED_PLAY_HOSTS = {"127.0.0.1", "localhost"} | {os.environ.get("MAC_IP", "").strip()}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Редиректы запрещены: цель обязана быть в allowlist ещё до запроса."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 # ---------------------------------------------------------------- state
 
 
@@ -422,7 +432,7 @@ class DeviceHandler(BaseHTTPRequestHandler):
                 400,
             )
         try:
-            with urllib.request.urlopen(url, timeout=20) as resp:  # noqa: S310 - url задаёт хост-сервер MCP
+            with _NO_REDIRECT_OPENER.open(url, timeout=20) as resp:  # noqa: S310 - url задаёт хост-сервер MCP
                 data = resp.read()
         except Exception as exc:  # noqa: BLE001
             return self._json({"success": False, "error": f"download failed: {exc}"}, 502)
