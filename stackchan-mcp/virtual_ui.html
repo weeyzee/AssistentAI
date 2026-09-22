@@ -15,21 +15,13 @@
     min-height: 100dvh;
   }
   #faceWrap {
-    width: min(88vw, 420px); aspect-ratio: 4 / 3; border-radius: 20px; overflow: hidden;
-    background: #1b1b22; display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 8px 30px #0008; position: relative;
+    width: min(92vw, 460px); aspect-ratio: 320 / 172; border-radius: 18px; overflow: hidden;
+    background: #050608; box-shadow: 0 0 0 1px #2a2a36, 0 8px 30px #0008;
   }
-  #face { width: 100%; height: 100%; object-fit: cover; display: block; }
-  #faceWrap.nod  { animation: nod 1s ease-in-out; }
-  #faceWrap.shake { animation: shake 0.9s ease-in-out; }
-  #faceWrap.move  { animation: move 1s ease-in-out; }
-  @keyframes nod   { 0%,100% { transform: none; } 50% { transform: translateY(26px) rotate(4deg); } }
-  @keyframes shake { 0%,100% { transform: none; } 25% { transform: translateX(-22px) rotate(-4deg); }
-                     75% { transform: translateX(22px) rotate(4deg); } }
-  @keyframes move  { 0%,100% { transform: none; } 50% { transform: rotate(-6deg); } }
+  #faceCanvas { width: 100%; height: 100%; display: block; image-rendering: pixelated; }
   #status { font-size: 14px; color: #9a9aa6; min-height: 20px; text-align: center; }
   #status.off { color: #ff8080; }
-  .row { display: flex; gap: 10px; width: min(88vw, 420px); }
+  .row { display: flex; gap: 10px; width: min(92vw, 460px); }
   button {
     flex: 1; padding: 16px 8px; font-size: 16px; font-weight: 600; color: #fff;
     background: #2a2a36; border: 1px solid #3a3a4a; border-radius: 14px;
@@ -38,7 +30,7 @@
   button.on { background: #7a2230; border-color: #b03040; }
   button.rec { background: #a02030; border-color: #e04050; }
   #log {
-    width: min(88vw, 420px); flex: 1; min-height: 90px; overflow-y: auto;
+    width: min(92vw, 460px); flex: 1; min-height: 80px; overflow-y: auto;
     font: 13px/1.5 ui-monospace, monospace; color: #8f8f9c;
     background: #17171d; border-radius: 12px; padding: 10px 12px;
   }
@@ -47,7 +39,7 @@
 </head>
 <body>
 
-<div id="faceWrap"><img id="face" src="/faces/calm" alt="морда"></div>
+<div id="faceWrap"><canvas id="faceCanvas"></canvas></div>
 <div id="status">соединяюсь…</div>
 
 <div class="row">
@@ -65,9 +57,12 @@
 <video id="cam" playsinline muted hidden></video>
 <canvas id="snap" width="320" height="240" hidden></canvas>
 
+<script src="/face_engine.js"></script>
 <script>
-const faceEl = document.getElementById('face');
-const wrap = document.getElementById('faceWrap');
+const face = new StackchanFace(document.getElementById('faceCanvas'));
+face.start();
+window.__face = face;   // для отладки и тестов
+
 const statusEl = document.getElementById('status');
 const logEl = document.getElementById('log');
 const player = document.getElementById('player');
@@ -77,7 +72,10 @@ const ctx2d = canvas.getContext('2d');
 
 let lastEventId = 0, recording = false, recorder = null, chunks = [];
 let camStream = null, camTimer = null, connected = false;
+let audioCtx = null, analyser = null, analyserData = null;
+let lastActivity = Date.now();
 
+// --- журнал и статус ---
 function log(msg) {
   const div = document.createElement('div');
   div.textContent = new Date().toLocaleTimeString('ru-RU') + '  ' + msg;
@@ -91,53 +89,94 @@ function status(text, off) {
 function setConnected(ok) {
   if (ok === connected) return;
   connected = ok;
-  status(ok ? 'на связи' : 'нет связи с сервером', !ok);
+  if (!ok) { face.setState('ERROR'); status('нет связи с сервером', true); }
+  else { face.setState('IDLE'); status('на связи'); }
+}
+function touch() {
+  lastActivity = Date.now();
+  if (face.state === 'SLEEPING') face.setState('IDLE');
 }
 
-// --- звук: iOS разрешает воспроизведение только после касания ---
+// --- звук: разблокировка и анализатор громкости для рта ---
 document.addEventListener('pointerdown', async () => {
+  touch();
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) { const ctx = new AC(); await ctx.resume(); }
-    log('звук разблокирован');
+    if (AC && !audioCtx) {
+      audioCtx = new AC();
+      await audioCtx.resume();
+      const src = audioCtx.createMediaElementSource(player);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyserData = new Uint8Array(analyser.fftSize);
+      src.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      log('звук разблокирован');
+    } else if (audioCtx) {
+      await audioCtx.resume();
+    }
   } catch (e) { log('звук: ' + e.message); }
-}, { once: true });
+}, { once: false });
 
-player.addEventListener('ended', () => { fetch('/web/played', { method: 'POST' }).catch(() => {}); });
+function readAudioLevel() {
+  if (!analyser) return 0;
+  analyser.getByteTimeDomainData(analyserData);
+  let sum = 0;
+  for (let i = 0; i < analyserData.length; i++) {
+    const v = (analyserData[i] - 128) / 128;
+    sum += v * v;
+  }
+  return Math.min(1, Math.sqrt(sum / analyserData.length) * 3.2);
+}
 
-function showFace(name) {
-  faceEl.dataset.face = name;
-  faceEl.src = '/faces/' + encodeURIComponent(name) + '?t=' + Date.now();
-}
-function animate(kind) {
-  wrap.classList.remove(kind);
-  void wrap.offsetWidth;
-  wrap.classList.add(kind);
-  setTimeout(() => wrap.classList.remove(kind), 1200);
-}
-function showSnapshot() {
-  const prev = faceEl.src;
-  faceEl.src = '/web/frame.jpg?t=' + Date.now();
-  setTimeout(() => { faceEl.src = prev; }, 6000);
-}
+player.addEventListener('ended', () => {
+  fetch('/web/played', { method: 'POST' }).catch(() => {});
+  face.setAudioLevel(0);
+  face.setState('HAPPY', 3500);
+});
+
+// --- события от сервера ---
+const FACE_MAP = {
+  calm: 'IDLE', thinking: 'THINKING', happy: 'HAPPY', sleepy: 'SLEEPING',
+  shy: 'HAPPY', smug: 'IDLE', pouty: 'SURPRISED',
+};
 
 function handleEvent(ev) {
+  touch();
   switch (ev.type) {
     case 'play':
       log('🔊 говорю');
+      face.setState('SPEAKING');
       player.src = ev.url + '?t=' + Date.now();
       player.play().catch(e => log('аудио: ' + e.message + ' — нажми «Звук»'));
       break;
-    case 'face':   log('😐 морда: ' + ev.face); showFace(ev.face); break;
-    case 'nod':    log('✅ киваю'); animate('nod'); break;
-    case 'shake':  log('❌ мотаю головой'); animate('shake'); break;
-    case 'move':   log('↔️ поворот'); animate('move'); break;
-    case 'home':   log('🏠 в исходную'); animate('move'); break;
-    case 'image':  log('👁 смотрю'); showSnapshot(); break;
+    case 'face': {
+      const mapped = FACE_MAP[ev.face] || 'IDLE';
+      log(`😐 морда: ${ev.face} → ${mapped}`);
+      face.setState(mapped, mapped === 'IDLE' ? 0 : 5000);
+      break;
+    }
+    case 'nod':    log('✅ киваю'); face.setState('HAPPY', 1600); break;
+    case 'shake':  log('❌ мотаю головой'); face.setState('SURPRISED', 1600); break;
+    case 'move':
+      log('↔️ поворот');
+      face.setGaze((ev.x || 0) / 128 * 6, -(ev.y || 0) / 90 * 4);
+      setTimeout(() => face.setGaze(0, 0), 2500);
+      break;
+    case 'home':   log('🏠 в исходную'); face.setGaze(0, 0); break;
+    case 'image':  log('👁 смотрю');
+      showPhoto();
+      break;
     case 'recording': log('✅ запись принята'); break;
-    case 'pet':    log('🖐 погладили!'); animate('nod'); break;
-    case 'tap':    log('👆 тап по полосе'); break;
+    case 'pet':    log('🖐 погладили!'); face.setState('HAPPY', 4000); break;
+    case 'tap':    log('👆 тап по полосе'); face.setState('SURPRISED', 1200); break;
   }
+}
+
+function showPhoto() {
+  const img = new Image();
+  img.onload = () => face.showPhoto(img, 6000);
+  img.src = '/web/frame.jpg?t=' + Date.now();
 }
 
 async function poll() {
@@ -148,9 +187,17 @@ async function poll() {
     for (const ev of data.events) handleEvent(ev);
     setConnected(true);
   } catch (e) { setConnected(false); }
-  setTimeout(poll, 200);
+  // сон после 3 минут тишины
+  if (face.state === 'IDLE' && Date.now() - lastActivity > 180000) {
+    face.setState('SLEEPING');
+  }
+  if (face.state === 'SPEAKING') {
+    face.setAudioLevel(readAudioLevel());
+  }
+  setTimeout(poll, 150);
 }
 
+// --- кнопки ---
 const btnMic = document.getElementById('btnMic');
 const btnCam = document.getElementById('btnCam');
 const btnPet = document.getElementById('btnPet');
@@ -162,6 +209,7 @@ function updateMicBtn() {
 }
 
 btnMic.addEventListener('click', async () => {
+  touch();
   if (recording && recorder) { recorder.stop(); return; }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
@@ -173,21 +221,25 @@ btnMic.addEventListener('click', async () => {
     recorder.onstop = async () => {
       stream.getTracks().forEach(t => t.stop());
       recording = false; updateMicBtn();
+      face.setState('THINKING');
       const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
       log('отправляю запись (' + blob.size + ' байт)…');
       try {
         const r = await fetch('/web/mic', { method: 'POST', body: blob });
         const d = await r.json();
         log(d.ok ? '✅ принято — Марк сейчас ответит…' : '❌ ' + d.error);
-      } catch (e) { log('❌ ' + e.message); }
+        if (!d.ok) face.setState('ERROR', 3000);
+      } catch (e) { log('❌ ' + e.message); face.setState('ERROR', 3000); }
     };
     recorder.start();
     recording = true; updateMicBtn();
+    face.setState('LISTENING');
     log('🎤 записываю…');
-  } catch (e) { log('микрофон: ' + e.message); }
+  } catch (e) { log('микрофон: ' + e.message); face.setState('ERROR', 3000); }
 });
 
 btnCam.addEventListener('click', async () => {
+  touch();
   if (camStream) {
     camStream.getTracks().forEach(t => t.stop());
     camStream = null;
@@ -204,7 +256,7 @@ btnCam.addEventListener('click', async () => {
     btnCam.classList.add('on');
     sendFrame();
     log('📷 камера включена');
-  } catch (e) { log('камера: ' + e.message); }
+  } catch (e) { log('камера: ' + e.message); face.setState('ERROR', 3000); }
 });
 
 async function sendFrame() {
@@ -217,10 +269,12 @@ async function sendFrame() {
 }
 
 btnPet.addEventListener('click', async () => {
+  touch();
   try { await fetch('/web/pet', { method: 'POST' }); } catch (e) { log(e.message); }
 });
 
 btnSound.addEventListener('click', () => {
+  touch();
   player.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
   player.play().then(() => log('звук включён')).catch(e => log('звук: ' + e.message));
 });

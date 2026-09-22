@@ -498,6 +498,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if path in {"/", "/index.html"}:
                 html = UI_FILE.read_bytes()
                 return self._bytes(html, "text/html; charset=utf-8")
+            if path == "/face_engine.js":
+                script = (ROOT / "face_engine.js").read_bytes()
+                return self._bytes(script, "application/javascript; charset=utf-8")
             if path.startswith("/faces/"):
                 name = path.rsplit("/", 1)[-1].removesuffix(".png")
                 target = face_file(name) or face_file("calm")

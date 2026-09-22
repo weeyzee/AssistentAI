@@ -1,0 +1,9 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]: соединяюсь…
+  - generic [ref=e5]:
+    - button "🎤 Говорить" [ref=e6]
+    - button "📷 Камера" [ref=e7]
+  - generic [ref=e8]:
+    - button "🖐 Погладить" [ref=e9]
+    - button "🔊 Звук" [ref=e10]
+  - generic [ref=e11]: 13:59:42 страница загружена

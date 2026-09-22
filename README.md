@@ -20,7 +20,8 @@ Claude Code (MCP-сервер stackchan, .mcp.json) — тоже может го
 | Файл | Назначение |
 |------|-----------|
 | `stackchan-mcp/virtual_stackchan.py` | Эмулятор прошивки: device API + веб-страница для телефона |
-| `stackchan-mcp/virtual_ui.html` | Страница телефона: запись, камера, мордочки, кнопки тач-полосы |
+| `stackchan-mcp/virtual_ui.html` | Страница телефона: запись, камера, лицо, кнопки тач-полосы |
+| `stackchan-mcp/face_engine.js` | Программное лицо 320×172 для переноса в прошивку ESP32 |
 | `stackchan-mcp/phone_assistant.py` | Фоновый голосовой цикл: запись → ASR → Claude → озвучка |
 | `stackchan-mcp/asr_service.py` | Копия сервиса GigaAM — оригинал живёт в проекте `asr-tests` |
 | `stackchan-mcp/start_virtual.ps1` | Запуск/остановка/статус всех фоновых процессов |
@@ -43,6 +44,23 @@ Copy-Item .env.virtual.example .env   # если .env ещё нет
 ```
 
 Страница для телефона: `https://<tailscale-ip>:8443/` (сертификат самоподписанный — принять один раз).
+
+## Лицо (эмулятор будущей прошивки)
+
+`face_engine.js` рисует лицо программно — без картинок, только примитивы, экран 320×172
+(ESP32-S3-LCD-1.47B-M, ST7789, альбомная ориентация). Состояния: `IDLE`, `LISTENING`,
+`THINKING`, `SPEAKING`, `HAPPY`, `SURPRISED`, `SLEEPING`, `ERROR`. Палитра: фон `#050608`,
+основной `#FFB000`, яркий `#FFD25A`, подсветка `#FF7A00`.
+
+Автоматика: моргание каждые 2–7 с, случайные взгляды в IDLE, рот по уровню звука в SPEAKING
+(Web Audio Analyser; на ESP32 — амплитуда I2S от MAX98357), сон после 3 минут тишины,
+кадр камеры показывается поверх лица 6 секунд (как в прошивке — JPEG на дисплее).
+
+Перенос на ESP32: `r(x,y,w,h,c)` → `display.fillRect(...)`, `tick/render` → задача ~30 FPS
+с отрисовкой кадра в Sprite и одним выводом на экран (двойной буфер в PSRAM 320×172×2 байта),
+`setGaze()` ← события `move()` и гироскоп QMI8658, `setAudioLevel()` ← уровень аудио.
+Карта событий MCP → состояния: запись → `LISTENING`, ожидание ответа → `THINKING`,
+воспроизведение → `SPEAKING`, `nod`/`pet` → `HAPPY`, `shake` → `SURPRISED`, нет связи → `ERROR`.
 
 ## Ограничения
 
