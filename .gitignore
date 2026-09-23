@@ -13,3 +13,7 @@ stackchan-mcp/.git.upstream-backup/
 
 # Артефакты Playwright MCP
 .playwright-mcp/
+
+# Ключи ElevenLabs
+**/.env
+elevellabs/.env
